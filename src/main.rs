@@ -35,15 +35,7 @@ fn download_gitignore(html_url: &str) {
     let _ = gitignore_file.write(&gitignore_data);
 }
 
-fn main() {
-    // env variables
-    dotenv().ok();
-    let github_token = std::env::var("GITHUB_TOKEN").expect("GitHub Token must be set");
-
-    // retrieve cli arguments
-    let args: Vec<String> = std::env::args().collect();
-    let language = &args[1]; // language
-
+fn pick_and_download_gitignore(language: &str, github_token: &str) {
     // init easy handle and url
     let mut easy = Easy::new();
     easy.url(
@@ -100,4 +92,16 @@ fn main() {
 
         download_gitignore(urls[selection]);
     }
+}
+
+fn main() {
+    // env variables
+    dotenv().ok();
+    let github_token = std::env::var("GITHUB_TOKEN").expect("GitHub Token must be set");
+
+    // retrieve cli arguments
+    let args: Vec<String> = std::env::args().collect();
+    let language = &args[1]; // language
+
+    pick_and_download_gitignore(language, &github_token);
 }
