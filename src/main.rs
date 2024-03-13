@@ -185,9 +185,12 @@ fn pick_and_download_license(license: &str, github_token: &str, project_name: &s
     let license = serde_json::Value::from_str(&license).unwrap();
     let license_body = license["body"].as_str().unwrap();
 
-    fs::write("LICENSE", license_body).expect("Can't write LICENSE file");
-    if license_name == "apache-2.0" {
-        make_apache_notice(project_name, author)
+    // Write LICENSE if it doesn't already exist
+    if fs::metadata("LICENSE").is_err() {
+        fs::write("LICENSE", license_body).expect("Can't write LICENSE file");
+        if license_name == "apache-2.0" {
+            make_apache_notice(project_name, author)
+        }
     }
 }
 
@@ -220,7 +223,10 @@ fn make_readme(project_name: &str, author: &str, author_github: &str) {
 "
     );
 
-    fs::write("README.md", readme).expect("Can't write README.md");
+    // Write README if it doesn't already exist
+    if fs::metadata("README.md").is_err() {
+        fs::write("README.md", readme).expect("Can't write README.md");
+    }
 }
 
 fn main() {
