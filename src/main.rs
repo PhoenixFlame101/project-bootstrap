@@ -2,10 +2,13 @@ use dotenv::dotenv;
 
 use curl::easy::{Easy, List};
 use serde_json;
+use tempfile::Builder;
+use walkdir::WalkDir;
 
 use std::env;
 use std::fs;
 use std::io::Write;
+use std::process::Command as ProcessCommand;
 use std::str::FromStr;
 
 use chrono::Datelike;
@@ -14,80 +17,60 @@ use convert_case::{Case, Casing};
 use clap::{Arg, Command};
 use dialoguer::{theme::ColorfulTheme, Select};
 
-fn download_file(html_url: &str, filename: &str) {
-    let raw_url = html_url.replace("/blob/", "/raw/");
+fn pick_and_download_gitignore(language: &str) {
+    let tmp_dir = Builder::new()
+        .prefix("gitignore")
+        .tempdir()
+        .expect("failed to create temp dir");
+    let repo_url = "https://github.com/github/gitignore.git";
 
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(filename)
-        .expect("error opening file");
+    let status = ProcessCommand::new("git")
+        .arg("clone")
+        .arg(repo_url)
+        .arg(tmp_dir.path())
+        .status()
+        .expect("failed to clone repo");
 
-    let mut easy = Easy::new();
-    easy.url(&raw_url).unwrap();
-    let _ = easy.follow_location(true);
-    let mut file_data = Vec::new();
-    {
-        let mut transfer = easy.transfer();
-        transfer
-            .write_function(|data| {
-                file_data.extend_from_slice(data);
-                Ok(data.len())
-            })
-            .unwrap();
-        transfer.perform().unwrap();
+    if !status.success() {
+        panic!("failed to clone repo");
     }
-    let _ = file.write(&file_data);
-}
 
-fn pick_and_download_gitignore(language: &str, github_token: &str) {
-    // init easy handle and url
-    let mut easy = Easy::new();
-    easy.url(
-        &format!("https://api.github.com/search/code?q=repo%3Agithub%2Fgitignore+{language}")[..],
-    )
-    .unwrap();
-
-    // init required headers for github api interfacing
-    let mut headers = List::new();
-    headers
-        .append("Accept: application/vnd.github+json")
-        .expect("accept header incorrect");
-    headers
-        .append(&format!("Authorization: Bearer {github_token}")[..])
-        .expect("auth token incorrect");
-    headers
-        .append("User-Agent: gitignore-add")
-        .expect("user agent incorrect");
-    easy.http_headers(headers).expect("wrong headers");
-
-    // write http response to buffer, and convert to json
-    let mut search_response = Vec::new();
+    let mut matching_files = Vec::new();
+    for entry in WalkDir::new(tmp_dir.path())
+        .into_iter()
+        .filter_map(|e| e.ok())
     {
-        let mut transfer = easy.transfer();
-        transfer
-            .write_function(|data| {
-                search_response.extend_from_slice(data);
-                Ok(data.len())
-            })
-            .unwrap();
-        transfer.perform().unwrap();
-    }
-    let search_response = String::from_utf8(search_response).unwrap();
-    let search_response = serde_json::Value::from_str(&search_response).unwrap();
-
-    // download .gitignore directly or show a prompt incase of multiple matches
-    if search_response["total_count"] == 1 {
-        let html_url = search_response["items"][0]["html_url"].as_str().unwrap();
-        download_file(&html_url, ".gitignore");
-    } else {
-        let mut options = Vec::new();
-        let mut urls = Vec::new();
-
-        for item in search_response["items"].as_array().unwrap() {
-            options.push(item["name"].as_str().unwrap());
-            urls.push(item["html_url"].as_str().unwrap());
+        let path = entry.path();
+        if path.is_file() {
+            if let Some(stem) = path.file_stem() {
+                if let Some(stem_str) = stem.to_str() {
+                    if stem_str.to_lowercase().contains(&language.to_lowercase()) {
+                        matching_files.push(path.to_path_buf());
+                    }
+                }
+            }
         }
+    }
+
+    let mut file_path = None;
+    let language_lower = language.to_lowercase();
+
+    let exact_match_index = matching_files.iter().position(|path| {
+        path.file_stem()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_lowercase()
+            == language_lower
+    });
+
+    if matching_files.len() == 1 && exact_match_index.is_some() {
+        file_path = Some(matching_files[0].clone());
+    } else if !matching_files.is_empty() {
+        let options: Vec<String> = matching_files
+            .iter()
+            .map(|p| p.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
 
         let selection = Select::with_theme(&ColorfulTheme::default())
             .with_prompt("Which .gitignore do you want to use?")
@@ -95,8 +78,52 @@ fn pick_and_download_gitignore(language: &str, github_token: &str) {
             .interact()
             .unwrap();
 
-        download_file(urls[selection], ".gitignore");
+        file_path = Some(matching_files[selection].clone());
+    } else {
+        println!("No matching .gitignore found for {}", language);
     }
+
+    if let Some(path) = file_path {
+        let mut gitignore_mode = "overwrite";
+
+        if fs::metadata(".gitignore").is_ok() {
+            let options = &["Overwrite", "Append", "Cancel"];
+            let selection = Select::with_theme(&ColorfulTheme::default())
+                .with_prompt(".gitignore already exists. What do you want to do?")
+                .items(options)
+                .default(0)
+                .interact()
+                .unwrap();
+
+            match selection {
+                0 => gitignore_mode = "overwrite",
+                1 => gitignore_mode = "append",
+                2 => {
+                    println!("Operation cancelled.");
+                    tmp_dir.close().expect("failed to close temp dir");
+                    return;
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        let mut open_options = fs::OpenOptions::new();
+        if gitignore_mode == "append" {
+            open_options.append(true).create(true);
+        } else {
+            open_options.write(true).create(true).truncate(true);
+        }
+
+        let mut file = open_options
+            .open(".gitignore")
+            .expect("failed to open .gitignore");
+
+        let content = fs::read_to_string(path).expect("failed to read gitignore content");
+        file.write_all(content.as_bytes())
+            .expect("failed to write to .gitignore");
+    }
+
+    tmp_dir.close().expect("failed to close temp dir");
 }
 
 fn pick_and_download_license(license: &str, github_token: &str, project_name: &str, author: &str) {
@@ -232,7 +259,6 @@ fn make_readme(project_name: &str, author: &str, author_github: &str) {
 fn main() {
     // env variables
     dotenv().ok();
-    let github_token = std::env::var("GITHUB_TOKEN").expect("GitHub Token must be set");
 
     // retrieve cli arguments
     let matches = Command::new("Project Bootstrap")
@@ -280,7 +306,8 @@ fn main() {
         .collect::<Vec<String>>()
         .join(" ");
 
-    pick_and_download_gitignore(&language, &github_token);
+    pick_and_download_gitignore(&language);
+    let github_token = std::env::var("GITHUB_TOKEN").expect("GitHub Token must be set");
     pick_and_download_license(&license, &github_token, &project_name, author);
     make_readme(&project_name, author, author_github)
 }
